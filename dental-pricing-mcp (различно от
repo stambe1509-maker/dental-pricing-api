@@ -1,0 +1,121 @@
+"""
+MCP Server — Dental Pricing (Kazanlak & Stara Zagora pilot)
+
+This exposes the same dental pricing data as proper MCP tools,
+so MCP-aware AI agents (Claude Desktop, etc.) can discover and call
+them directly — instead of needing a human to paste a URL in chat.
+
+Run locally:
+    python3 mcp_server.py
+
+Deploys the same way as app.py (Render Web Service), using
+Streamable HTTP transport so it's reachable over the internet.
+"""
+
+from fastmcp import FastMCP
+import json
+import os
+
+DATA_PATH = os.path.join(os.path.dirname(__file__), "dental_data.json")
+
+with open(DATA_PATH, "r", encoding="utf-8") as f:
+    DATA = json.load(f)
+
+CLINICS = DATA["clinics"]
+PRICES = DATA["prices"]
+
+mcp = FastMCP(
+    name="dental-pricing-kazanlak-stara-zagora",
+    instructions=(
+        "Structured, verified pricing data for dental clinics in Kazanlak and "
+        "Stara Zagora, Bulgaria. Use these tools to look up clinics, get prices "
+        "for specific services, or compare a service's price across clinics."
+    ),
+)
+
+
+@mcp.tool()
+def list_clinics(city: str = "") -> dict:
+    """
+    List dental clinics in the pilot dataset, optionally filtered by city.
+
+    Args:
+        city: Optional city slug filter — "kazanlak" or "stara-zagora".
+              Leave empty to list clinics from both cities.
+    """
+    results = CLINICS
+    if city:
+        results = [c for c in results if c["city_slug"] == city]
+    return {"count": len(results), "clinics": results}
+
+
+@mcp.tool()
+def get_prices(city: str = "", clinic_id: str = "", service: str = "") -> dict:
+    """
+    Get dental service prices, optionally filtered by city, clinic, and/or service.
+
+    Args:
+        city: Optional city slug — "kazanlak" or "stara-zagora".
+        clinic_id: Optional clinic id (see list_clinics for valid ids).
+        service: Optional free-text search on the service name (e.g. "имплант",
+                 "коронка", "преглед"). Case-insensitive substring match.
+    """
+    results = PRICES
+    if city:
+        results = [r for r in results if r["city_slug"] == city]
+    if clinic_id:
+        results = [r for r in results if r["clinic_id"] == clinic_id]
+    if service:
+        needle = service.lower()
+        results = [r for r in results if needle in r["service"].lower()]
+    return {"count": len(results), "prices": results}
+
+
+@mcp.tool()
+def compare_service_price(service: str, city: str = "") -> dict:
+    """
+    Compare the price of a given dental service across all clinics,
+    sorted from cheapest to most expensive. Useful for "what's the
+    cheapest X in Y" style questions.
+
+    Args:
+        service: Free-text service name to search for (e.g. "имплант").
+        city: Optional city slug filter — "kazanlak" or "stara-zagora".
+    """
+    needle = service.lower()
+    matches = [r for r in PRICES if needle in r["service"].lower()]
+    if city:
+        matches = [r for r in matches if r["city_slug"] == city]
+
+    def sort_key(r):
+        return r["price_from_bgn"] if r["price_from_bgn"] is not None else float("inf")
+
+    matches_sorted = sorted(matches, key=sort_key)
+    return {
+        "query": service,
+        "city_filter": city or "all",
+        "count": len(matches_sorted),
+        "cheapest_to_most_expensive": matches_sorted,
+    }
+
+
+@mcp.tool()
+def dataset_info() -> dict:
+    """
+    Get metadata about this dataset: how many clinics and price records
+    are covered, and which cities. Useful as a first call to understand
+    the scope of available data before querying further.
+    """
+    cities = sorted(set(c["city"] for c in CLINICS))
+    return {
+        "total_clinics": len(CLINICS),
+        "total_price_records": len(PRICES),
+        "cities": cities,
+        "pilot_scope": "Dental clinics — Kazanlak and Stara Zagora, Bulgaria",
+        "currency": "BGN",
+    }
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
